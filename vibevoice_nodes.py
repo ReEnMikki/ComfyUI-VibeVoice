@@ -1,4 +1,4 @@
-# MODIFIED vibevoice_nodes.py
+# FINAL CORRECTED vibevoice_nodes.py (Full Version)
 import os
 import re
 import torch
@@ -43,7 +43,6 @@ logger = logging.getLogger(__name__)
 LOADED_MODELS = {}
 VIBEVOICE_PATCHER_CACHE = {}
 
-# <-- MODIFIED: Added a new entry for DevParker's quantized model
 MODEL_CONFIGS = {
     "VibeVoice-1.5B": {
         "repo_id": "microsoft/VibeVoice-1.5B",
@@ -59,9 +58,9 @@ MODEL_CONFIGS = {
     },
     "VibeVoice-Large-4bit (DevParker)": {
         "repo_id": "DevParker/VibeVoice7b-low-vram",
-        "size_gb": 4.5,  # Approximate size of the 4-bit model
+        "size_gb": 4.5,
         "tokenizer_repo": "Qwen/Qwen2.5-7B",
-        "is_quantized": True # <-- MODIFIED: Added a flag to identify this model
+        "is_quantized": True
     }
 }
 
@@ -72,16 +71,11 @@ if SAGE_ATTENTION_AVAILABLE:
 def cleanup_old_models(keep_cache_key=None):
     """Clean up old models, optionally keeping one specific model loaded"""
     global LOADED_MODELS, VIBEVOICE_PATCHER_CACHE
-    
     keys_to_remove = []
-    
-    # Clear LOADED_MODELS
     for key in list(LOADED_MODELS.keys()):
         if key != keep_cache_key:
             keys_to_remove.append(key)
             del LOADED_MODELS[key]
-    
-    # Clear VIBEVOICE_PATCHER_CACHE - but more carefully
     for key in list(VIBEVOICE_PATCHER_CACHE.keys()):
         if key != keep_cache_key:
             try:
@@ -92,7 +86,6 @@ def cleanup_old_models(keep_cache_key=None):
                 del VIBEVOICE_PATCHER_CACHE[key]
             except Exception as e:
                 logger.warning(f"Error cleaning up patcher {key}: {e}")
-    
     if keys_to_remove:
         logger.info(f"Cleaned up cached models: {keys_to_remove}")
         gc.collect()
@@ -105,19 +98,14 @@ class VibeVoiceModelHandler(torch.nn.Module):
         self.model_pack_name = model_pack_name
         self.attention_mode = attention_mode
         self.use_llm_4bit = use_llm_4bit
-        
-        # <-- MODIFIED: Check if the selected model is the pre-quantized one
         is_prequantized = MODEL_CONFIGS.get(model_pack_name, {}).get("is_quantized", False)
-        # The model is considered quantized if it's the pre-quantized version OR the user checked the box
         self.is_final_quantized = is_prequantized or use_llm_4bit
-
         self.cache_key = f"{model_pack_name}_attn_{attention_mode}_q4_{int(self.is_final_quantized)}"
         self.model = None
         self.processor = None
         self.size = int(MODEL_CONFIGS[model_pack_name].get("size_gb", 4.0) * (1024**3))
 
     def load_model(self, device, attention_mode="eager"):
-        # <-- MODIFIED: Pass the final quantization decision to the loader
         self.model, self.processor = VibeVoiceLoader.load_model(self.model_pack_name, device, attention_mode, use_llm_4bit=self.is_final_quantized)
         self.model.to(device)
 
@@ -153,14 +141,11 @@ class VibeVoicePatcher(comfy.model_patcher.ModelPatcher):
             logger.info(f"Offloading VibeVoice models for '{self.model.model_pack_name}' ({self.attention_mode}) to {device_to}...")
             self.model.model = None
             self.model.processor = None
-            
             if self.cache_key in LOADED_MODELS:
                 del LOADED_MODELS[self.cache_key]
                 logger.info(f"Cleared LOADED_MODELS cache for: {self.cache_key}")
-            
             gc.collect()
             model_management.soft_empty_cache()
-            
         return super().unpatch_model(device_to, unpatch_weights, *args, **kwargs)
 
 class VibeVoiceLoader:
@@ -168,27 +153,22 @@ class VibeVoiceLoader:
     def get_model_path(model_name: str):
         if model_name not in MODEL_CONFIGS:
             raise ValueError(f"Unknown VibeVoice model: {model_name}")
-        
         vibevoice_path = os.path.join(folder_paths.get_folder_paths("tts")[0], "VibeVoice")
-        
-        # <-- MODIFIED: Use a subfolder name based on the repo_id to avoid conflicts
         repo_id = MODEL_CONFIGS[model_name]["repo_id"]
         safe_folder_name = repo_id.replace("/", "_")
         model_path = os.path.join(vibevoice_path, safe_folder_name)
-        
-        index_file = os.path.join(model_path, "model.safetensors.index.json")
-        if not os.path.exists(index_file):
+        completion_marker = os.path.join(model_path, ".download_complete")
+        if not os.path.exists(completion_marker):
             print(f"Downloading VibeVoice model: {model_name} from {repo_id}...")
-            snapshot_download(repo_id=repo_id, local_dir=model_path, local_dir_use_symlinks=False) # Safest for Colab
+            snapshot_download(repo_id=repo_id, local_dir=model_path, local_dir_use_symlinks=False)
+            with open(completion_marker, 'w') as f: f.write('done')
         return model_path
 
     @staticmethod
     def _check_gpu_for_sage_attention():
         """Check if the current GPU is compatible with SageAttention."""
-        if not SAGE_ATTENTION_AVAILABLE:
-            return False
-        if not torch.cuda.is_available():
-            return False
+        if not SAGE_ATTENTION_AVAILABLE: return False
+        if not torch.cuda.is_available(): return False
         major, _ = torch.cuda.get_device_capability()
         if major < 8:
             logger.warning(f"Your GPU (compute capability {major}.x) does not support SageAttention, which requires CC 8.0+. Sage option will be disabled.")
@@ -197,99 +177,71 @@ class VibeVoiceLoader:
         
     @staticmethod
     def load_model(model_name: str, device, attention_mode: str = "eager", use_llm_4bit: bool = False):
-
-        # <-- MODIFIED: Check if the model is the pre-quantized one and log it
         is_prequantized = MODEL_CONFIGS.get(model_name, {}).get("is_quantized", False)
         if is_prequantized:
             logger.info(f"Loading pre-quantized model '{model_name}'. 4-bit loading is forced ON.")
-            use_llm_4bit = True # Force quantization for this model
-
+            use_llm_4bit = True
         if use_llm_4bit and attention_mode in ["eager", "flash_attention_2"]:
             logger.warning(f"Attention mode '{attention_mode}' is not recommended with 4-bit quantization. Falling back to 'sdpa' for stability and performance.")
             attention_mode = "sdpa"
-
         if attention_mode not in ATTENTION_MODES:
             logger.warning(f"Unknown attention mode '{attention_mode}', falling back to eager")
             attention_mode = "eager"
-
         cache_key = f"{model_name}_attn_{attention_mode}_q4_{int(use_llm_4bit)}"
-        
         if cache_key in LOADED_MODELS:
             logger.info(f"Using cached model with {attention_mode} attention and q4={use_llm_4bit}")
             return LOADED_MODELS[cache_key]
 
         model_path = VibeVoiceLoader.get_model_path(model_name)
         
-        logger.info(f"Loading VibeVoice model components from: {model_path}")
+        # --- FINAL FIX IS HERE ---
+        # Check for the DevParker model and adjust the path to include the '4bit' subdirectory.
+        final_load_path = model_path
+        if model_name == "VibeVoice-Large-4bit (DevParker)":
+            specific_path = os.path.join(model_path, "4bit")
+            if os.path.isdir(specific_path):
+                final_load_path = specific_path
+                logger.info(f"DevParker model detected. Using specific subfolder: {final_load_path}")
+            else:
+                logger.warning(f"Expected '4bit' subfolder for DevParker model not found at {specific_path}. Attempting to load from root.")
+        # --- END FINAL FIX ---
+
+        logger.info(f"Loading VibeVoice model components from: {final_load_path}")
 
         tokenizer_repo = MODEL_CONFIGS[model_name].get("tokenizer_repo")
-        tokenizer_file_path = os.path.join(model_path, "tokenizer.json")
-        # Check if tokenizer.json exists locally. If not, download it directly to the model folder.
+        tokenizer_file_path = os.path.join(model_path, "tokenizer.json") # Tokenizer is usually at the root
         if not os.path.exists(tokenizer_file_path):
             logger.info(f"tokenizer.json not found in {model_path}. Downloading from '{tokenizer_repo}'...")
             try:
-                hf_hub_download(
-                    repo_id=tokenizer_repo,
-                    filename="tokenizer.json",
-                    local_dir=model_path,
-                )
+                hf_hub_download(repo_id=tokenizer_repo, filename="tokenizer.json", local_dir=model_path)
             except Exception as e:
-                logger.error(f"Failed to download tokenizer.json: {e}")
-                raise
-
+                logger.error(f"Failed to download tokenizer.json: {e}"); raise
         
         vibevoice_tokenizer = VibeVoiceTextTokenizerFast(tokenizer_file=tokenizer_file_path)
         audio_processor = VibeVoiceTokenizerProcessor()
         processor = VibeVoiceProcessor(tokenizer=vibevoice_tokenizer, audio_processor=audio_processor)
         
-        # Base dtype for full precision and memory-optimized 4-bit
-        if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
-            model_dtype = torch.bfloat16
-        else:
-            model_dtype = torch.float16
-
-        quant_config = None
-        final_load_dtype = model_dtype
+        model_dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+        quant_config, final_load_dtype = None, model_dtype
 
         if use_llm_4bit:
-            # Default to bfloat16/float16 for memory savings
             bnb_compute_dtype = model_dtype
-            
-            # SageAttention is numerically sensitive and requires fp32 compute dtype for stability
-            # SDPA is more robust and can use bf16.
             if attention_mode == 'sage':
                 logger.info("Using SageAttention with 4-bit quant. Forcing fp32 compute dtype for maximum stability.")
-                bnb_compute_dtype = torch.float32
-                final_load_dtype = torch.float32
+                bnb_compute_dtype = final_load_dtype = torch.float32
             else:
                  logger.info(f"Using {attention_mode} with 4-bit quant. Using {model_dtype} compute dtype for memory efficiency.")
-            
-            # <-- MODIFIED: This config is correct for both on-the-fly and pre-quantized loading
-            quant_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_compute_dtype=bnb_compute_dtype,
-            )
+            quant_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=bnb_compute_dtype)
 
         attn_implementation_for_load = "sdpa" if attention_mode == "sage" else attention_mode
-        
         try:
             logger.info(f"Loading model with dtype: {final_load_dtype} and attention: '{attn_implementation_for_load}'")
-            # Build a dictionary of keyword arguments for from_pretrained.
-            from_pretrained_kwargs = {
-                "attn_implementation": attn_implementation_for_load,
-                "device_map": "auto", # <-- MODIFIED: device_map='auto' is required for bitsandbytes
-                "quantization_config": quant_config,
-            }
-
-            # Use the correct dtype argument based on the transformers version.
-            if _DTYPE_ARG_SUPPORTED:
-                from_pretrained_kwargs['dtype'] = final_load_dtype
-            else:
-                from_pretrained_kwargs['torch_dtype'] = final_load_dtype
+            from_pretrained_kwargs = {"attn_implementation": attn_implementation_for_load, "device_map": "auto", "quantization_config": quant_config}
+            if _DTYPE_ARG_SUPPORTED: from_pretrained_kwargs['dtype'] = final_load_dtype
+            else: from_pretrained_kwargs['torch_dtype'] = final_load_dtype
+            
             model = VibeVoiceForConditionalGenerationInference.from_pretrained(
-                model_path,
+                final_load_path, # Use the corrected path here
                 **from_pretrained_kwargs
             )
             
@@ -297,38 +249,26 @@ class VibeVoiceLoader:
                 if VibeVoiceLoader._check_gpu_for_sage_attention():
                     logger.info("Applying SageAttention patch to the model...")
                     set_sage_attention(model)
-                else:
-                    logger.error("Cannot apply SageAttention due to incompatible GPU. Falling back.")
-                    raise RuntimeError("Incompatible hardware/setup for SageAttention.")
+                else: raise RuntimeError("Incompatible hardware/setup for SageAttention.")
 
-            model.eval()
-            setattr(model, "_llm_4bit", bool(quant_config))
-            
+            model.eval(); setattr(model, "_llm_4bit", bool(quant_config))
             LOADED_MODELS[cache_key] = (model, processor)
             logger.info(f"Successfully configured model with {attention_mode} attention")
             return model, processor
-            
         except Exception as e:
             logger.error(f"Failed to load model with {attention_mode} attention: {e}")
-            # Fallback logic
-            if attention_mode in ["sage", "flash_attention_2"]:
-                logger.info("Attempting fallback to SDPA...")
-                return VibeVoiceLoader.load_model(model_name, device, "sdpa", use_llm_4bit)
-            elif attention_mode == "sdpa":
+            if attention_mode != "eager":
                 logger.info("Attempting fallback to eager...")
                 return VibeVoiceLoader.load_model(model_name, device, "eager", use_llm_4bit)
             else:
                 raise RuntimeError(f"Failed to load model even with eager attention: {e}")
 
-
 def set_vibevoice_seed(seed: int):
     """Sets the seed for torch, numpy, and random, handling large seeds for numpy."""
     if seed == 0:
         seed = random.randint(1, 0xffffffffffffffff)
-    
     MAX_NUMPY_SEED = 2**32 - 1
     numpy_seed = seed % MAX_NUMPY_SEED
-    
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
@@ -342,17 +282,16 @@ def parse_script_1_based(script: str) -> tuple[list[tuple[int, str]], list[int]]
     Internally, it converts speaker IDs to 0-based for the model.
     """
     parsed_lines = []
-    speaker_ids_in_script = [] # This will store the 1-based IDs from the script
+    speaker_ids_in_script = []
     for line in script.strip().split("\n"):
         if not (line := line.strip()): continue
-        match = re.match(r'^Speaker\s+(\d+)\s*:\s*(.*)$', line, re-IGNORECASE)
+        match = re.match(r'^Speaker\s+(\d+)\s*:\s*(.*)$', line, re.IGNORECASE)
         if match:
             speaker_id = int(match.group(1))
             if speaker_id < 1:
                 logger.warning(f"Speaker ID must be 1 or greater. Skipping line: '{line}'")
                 continue
             text = ' ' + match.group(2).strip()
-            # Internally, the model expects 0-based indexing for speakers
             internal_speaker_id = speaker_id - 1
             parsed_lines.append((internal_speaker_id, text))
             if speaker_id not in speaker_ids_in_script:
@@ -368,39 +307,27 @@ def preprocess_comfy_audio(audio_dict: dict, target_sr: int = 24000) -> np.ndarr
     if not audio_dict: return None
     waveform_tensor = audio_dict.get('waveform')
     if waveform_tensor is None or waveform_tensor.numel() == 0: return None
-    
     waveform = waveform_tensor[0].cpu().numpy()
     original_sr = audio_dict['sample_rate']
-    
     if waveform.ndim > 1:
         waveform = np.mean(waveform, axis=0)
-
-    # Check for invalid values
     if np.any(np.isnan(waveform)) or np.any(np.isinf(waveform)):
         logger.error("Audio contains NaN or Inf values, replacing with zeros")
         waveform = np.nan_to_num(waveform, nan=0.0, posinf=0.0, neginf=0.0)
-    
-    # Ensure audio is not completely silent or has extreme values
     if np.all(waveform == 0):
         logger.warning("Audio waveform is completely silent")
-    
-    # Normalize extreme values
     max_val = np.abs(waveform).max()
     if max_val > 10.0:
         logger.warning(f"Audio values are very large (max: {max_val}), normalizing")
         waveform = waveform / max_val
-
     if original_sr != target_sr:
         if librosa is None:
             raise ImportError("`librosa` package is required for audio resampling. Please install it with `pip install librosa`.")
         logger.warning(f"Resampling reference audio from {original_sr}Hz to {target_sr}Hz.")
         waveform = librosa.resample(y=waveform, orig_sr=original_sr, target_sr=target_sr)
-    
-    # Final check after resampling
     if np.any(np.isnan(waveform)) or np.any(np.isinf(waveform)):
         logger.error("Audio contains NaN or Inf after resampling, replacing with zeros")
         waveform = np.nan_to_num(waveform, nan=0.0, posinf=0.0, neginf=0.0)
-        
     return waveform.astype(np.float32)
 
 def check_for_interrupt():
@@ -423,7 +350,6 @@ class VibeVoiceTTSNode:
                     "default": "Speaker 1: Hello from ComfyUI!\nSpeaker 2: VibeVoice sounds amazing.",
                     "tooltip": "The script for the conversation. Use 'Speaker 1:', 'Speaker 2:', etc. to assign lines to different voices. Each speaker line should be on a new line."
                 }),
-                # <-- MODIFIED: Updated label and tooltip for clarity
                 "quantize_llm_4bit": ("BOOLEAN", {
                     "default": True, "label_on": "Enabled", "label_off": "Disabled",
                     "tooltip": "Enable 4-bit quantization. This is REQUIRED for 4-bit models and recommended for large models on GPUs with < 24GB VRAM."
@@ -478,95 +404,55 @@ class VibeVoiceTTSNode:
     CATEGORY = "audio/tts"
 
     def generate_audio(self, model_name, text, attention_mode, cfg_scale, inference_steps, seed, do_sample, temperature, top_p, top_k, quantize_llm_4bit, force_offload, **kwargs):
-        
-        # <-- MODIFIED: Logic moved to VibeVoiceModelHandler and VibeVoiceLoader for better structure
         is_prequantized = MODEL_CONFIGS.get(model_name, {}).get("is_quantized", False)
         is_final_quantized = is_prequantized or quantize_llm_4bit
-
         actual_attention_mode = attention_mode
         if is_final_quantized and attention_mode in ["eager", "flash_attention_2"]:
             actual_attention_mode = "sdpa"
-        
         cache_key = f"{model_name}_attn_{actual_attention_mode}_q4_{int(is_final_quantized)}"
-        
-        # Clean up old models when switching to a different model
         if cache_key not in VIBEVOICE_PATCHER_CACHE:
-            # Only keep models that are currently being requested
             cleanup_old_models(keep_cache_key=cache_key)
-            
             model_handler = VibeVoiceModelHandler(model_name, attention_mode, use_llm_4bit=quantize_llm_4bit)
-            patcher = VibeVoicePatcher(
-                model_handler,
-                attention_mode=attention_mode,
-                load_device=model_management.get_torch_device(), 
-                offload_device=model_management.unet_offload_device(),
-                size=model_handler.size
-            )
+            patcher = VibeVoicePatcher(model_handler, attention_mode=attention_mode, load_device=model_management.get_torch_device(), offload_device=model_management.unet_offload_device(), size=model_handler.size)
             VIBEVOICE_PATCHER_CACHE[cache_key] = patcher
-        
         patcher = VIBEVOICE_PATCHER_CACHE[cache_key]
         model_management.load_model_gpu(patcher)
         model = patcher.model.model
         processor = patcher.model.processor
-        
         if model is None or processor is None:
             raise RuntimeError("VibeVoice model and processor could not be loaded. Check logs for errors.")
-        
         parsed_lines_0_based, speaker_ids_1_based = parse_script_1_based(text)
         if not parsed_lines_0_based:
             raise ValueError("Script is empty or invalid. Use 'Speaker 1:', 'Speaker 2:', etc. format.")
-            
         full_script = "\n".join([f"Speaker {spk+1}: {txt}" for spk, txt in parsed_lines_0_based])
-        
         speaker_inputs = {i: kwargs.get(f"speaker_{i}_voice") for i in range(1, 5)}
         voice_samples_np = [preprocess_comfy_audio(speaker_inputs[sid]) for sid in speaker_ids_1_based]
-        
         if any(v is None for v in voice_samples_np):
             missing_ids = [sid for sid, v in zip(speaker_ids_1_based, voice_samples_np) if v is None]
             raise ValueError(f"Script requires voices for Speakers {missing_ids}, but they were not provided.")
-        
         set_vibevoice_seed(seed)
-        
         try:
-            inputs = processor(
-                text=[full_script], voice_samples=[voice_samples_np], padding=True,
-                return_tensors="pt", return_attention_mask=True
-            )
-            
-            # Validate inputs before moving to GPU
+            inputs = processor(text=[full_script], voice_samples=[voice_samples_np], padding=True, return_tensors="pt", return_attention_mask=True)
             for key, value in inputs.items():
-                if isinstance(value, torch.Tensor):
-                    if torch.any(torch.isnan(value)) or torch.any(torch.isinf(value)):
-                        logger.error(f"Input tensor '{key}' contains NaN or Inf values")
-                        raise ValueError(f"Invalid values in input tensor: {key}")
-            
+                if isinstance(value, torch.Tensor) and (torch.any(torch.isnan(value)) or torch.any(torch.isinf(value))):
+                    logger.error(f"Input tensor '{key}' contains NaN or Inf values")
+                    raise ValueError(f"Invalid values in input tensor: {key}")
             inputs = {k: v.to(model.device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
-            
             model.set_ddpm_inference_steps(num_steps=inference_steps)
-
             generation_config = {'do_sample': do_sample}
             if do_sample:
                 generation_config['temperature'] = temperature
                 generation_config['top_p'] = top_p
-                if top_k > 0:
-                    generation_config['top_k'] = top_k
-
+                if top_k > 0: generation_config['top_k'] = top_k
             with torch.no_grad():
                 pbar = ProgressBar(inference_steps)
-                
                 def progress_callback(step, total_steps):
                     pbar.update(1)
                     if model_management.interrupt_current_processing:
                         raise comfy.model_management.InterruptProcessingException()
-
                 try:
-                    outputs = model.generate(
-                        **inputs, max_new_tokens=None, cfg_scale=cfg_scale,
-                        tokenizer=processor.tokenizer, generation_config=generation_config,
-                        verbose=False, stop_check_fn=check_for_interrupt
-                    )
+                    outputs = model.generate(**inputs, max_new_tokens=None, cfg_scale=cfg_scale, tokenizer=processor.tokenizer, generation_config=generation_config, verbose=False, stop_check_fn=check_for_interrupt)
                     pbar.update(inference_steps - pbar.current)
-                    
                 except RuntimeError as e:
                     error_msg = str(e).lower()
                     if "assertion" in error_msg or "cuda" in error_msg:
@@ -575,26 +461,20 @@ class VibeVoiceTTSNode:
                         logger.error("Try restarting ComfyUI, using different audio files, or switching to 'eager' attention mode.")
                     raise e
                 except comfy.model_management.InterruptProcessingException:
-                    logger.info("VibeVoice generation interrupted by user")
-                    raise
-                finally:
-                    pbar.update_absolute(inference_steps)
-
+                    logger.info("VibeVoice generation interrupted by user"); raise
+                finally: pbar.update_absolute(inference_steps)
         except comfy.model_management.InterruptProcessingException:
             logger.info("VibeVoice TTS generation was cancelled")
             return ({"waveform": torch.zeros((1, 1, 24000), dtype=torch.float32), "sample_rate": 24000},)
-        
         except Exception as e:
             logger.error(f"Error during VibeVoice generation with {attention_mode} attention: {e}")
             if "interrupt" in str(e).lower() or "cancel" in str(e).lower():
                 logger.info("Generation was interrupted")
                 return ({"waveform": torch.zeros((1, 1, 24000), dtype=torch.float32), "sample_rate": 24000},)
             raise
-
         output_waveform = outputs.speech_outputs[0]
         if output_waveform.ndim == 1: output_waveform = output_waveform.unsqueeze(0)
         if output_waveform.ndim == 2: output_waveform = output_waveform.unsqueeze(0)
-        
         if force_offload:
             logger.info(f"Force offloading VibeVoice model '{model_name}' from VRAM...")
             if patcher.is_loaded:
@@ -603,7 +483,6 @@ class VibeVoiceTTSNode:
             gc.collect()
             model_management.soft_empty_cache()
             logger.info("Model force offload completed")
-            
         return ({"waveform": output_waveform.detach().cpu(), "sample_rate": 24000},)
 
 NODE_CLASS_MAPPINGS = {"VibeVoiceTTS": VibeVoiceTTSNode}
