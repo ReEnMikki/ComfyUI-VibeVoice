@@ -1,3 +1,4 @@
+# MODIFIED vibevoice_nodes.py
 import os
 import re
 import torch
@@ -42,16 +43,25 @@ logger = logging.getLogger(__name__)
 LOADED_MODELS = {}
 VIBEVOICE_PATCHER_CACHE = {}
 
+# <-- MODIFIED: Added a new entry for DevParker's quantized model
 MODEL_CONFIGS = {
     "VibeVoice-1.5B": {
         "repo_id": "microsoft/VibeVoice-1.5B",
         "size_gb": 3.0,
-        "tokenizer_repo": "Qwen/Qwen2.5-1.5B"
+        "tokenizer_repo": "Qwen/Qwen2.5-1.5B",
+        "is_quantized": False
     },
     "VibeVoice-Large": {
         "repo_id": "aoi-ot/VibeVoice-Large",
         "size_gb": 17.4,
-        "tokenizer_repo": "Qwen/Qwen2.5-7B"
+        "tokenizer_repo": "Qwen/Qwen2.5-7B",
+        "is_quantized": False
+    },
+    "VibeVoice-Large-4bit (DevParker)": {
+        "repo_id": "DevParker/VibeVoice7b-low-vram",
+        "size_gb": 4.5,  # Approximate size of the 4-bit model
+        "tokenizer_repo": "Qwen/Qwen2.5-7B",
+        "is_quantized": True # <-- MODIFIED: Added a flag to identify this model
     }
 }
 
@@ -95,13 +105,20 @@ class VibeVoiceModelHandler(torch.nn.Module):
         self.model_pack_name = model_pack_name
         self.attention_mode = attention_mode
         self.use_llm_4bit = use_llm_4bit
-        self.cache_key = f"{model_pack_name}_attn_{attention_mode}_q4_{int(use_llm_4bit)}"
+        
+        # <-- MODIFIED: Check if the selected model is the pre-quantized one
+        is_prequantized = MODEL_CONFIGS.get(model_pack_name, {}).get("is_quantized", False)
+        # The model is considered quantized if it's the pre-quantized version OR the user checked the box
+        self.is_final_quantized = is_prequantized or use_llm_4bit
+
+        self.cache_key = f"{model_pack_name}_attn_{attention_mode}_q4_{int(self.is_final_quantized)}"
         self.model = None
         self.processor = None
         self.size = int(MODEL_CONFIGS[model_pack_name].get("size_gb", 4.0) * (1024**3))
 
     def load_model(self, device, attention_mode="eager"):
-        self.model, self.processor = VibeVoiceLoader.load_model(self.model_pack_name, device, attention_mode, use_llm_4bit=self.use_llm_4bit)
+        # <-- MODIFIED: Pass the final quantization decision to the loader
+        self.model, self.processor = VibeVoiceLoader.load_model(self.model_pack_name, device, attention_mode, use_llm_4bit=self.is_final_quantized)
         self.model.to(device)
 
 class VibeVoicePatcher(comfy.model_patcher.ModelPatcher):
@@ -153,13 +170,16 @@ class VibeVoiceLoader:
             raise ValueError(f"Unknown VibeVoice model: {model_name}")
         
         vibevoice_path = os.path.join(folder_paths.get_folder_paths("tts")[0], "VibeVoice")
-        model_path = os.path.join(vibevoice_path, model_name)
+        
+        # <-- MODIFIED: Use a subfolder name based on the repo_id to avoid conflicts
+        repo_id = MODEL_CONFIGS[model_name]["repo_id"]
+        safe_folder_name = repo_id.replace("/", "_")
+        model_path = os.path.join(vibevoice_path, safe_folder_name)
         
         index_file = os.path.join(model_path, "model.safetensors.index.json")
         if not os.path.exists(index_file):
-            print(f"Downloading VibeVoice model: {model_name}...")
-            repo_id = MODEL_CONFIGS[model_name]["repo_id"]
-            snapshot_download(repo_id=repo_id, local_dir=model_path)
+            print(f"Downloading VibeVoice model: {model_name} from {repo_id}...")
+            snapshot_download(repo_id=repo_id, local_dir=model_path, local_dir_use_symlinks=False) # Safest for Colab
         return model_path
 
     @staticmethod
@@ -177,6 +197,12 @@ class VibeVoiceLoader:
         
     @staticmethod
     def load_model(model_name: str, device, attention_mode: str = "eager", use_llm_4bit: bool = False):
+
+        # <-- MODIFIED: Check if the model is the pre-quantized one and log it
+        is_prequantized = MODEL_CONFIGS.get(model_name, {}).get("is_quantized", False)
+        if is_prequantized:
+            logger.info(f"Loading pre-quantized model '{model_name}'. 4-bit loading is forced ON.")
+            use_llm_4bit = True # Force quantization for this model
 
         if use_llm_4bit and attention_mode in ["eager", "flash_attention_2"]:
             logger.warning(f"Attention mode '{attention_mode}' is not recommended with 4-bit quantization. Falling back to 'sdpa' for stability and performance.")
@@ -238,6 +264,7 @@ class VibeVoiceLoader:
             else:
                  logger.info(f"Using {attention_mode} with 4-bit quant. Using {model_dtype} compute dtype for memory efficiency.")
             
+            # <-- MODIFIED: This config is correct for both on-the-fly and pre-quantized loading
             quant_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
@@ -252,7 +279,7 @@ class VibeVoiceLoader:
             # Build a dictionary of keyword arguments for from_pretrained.
             from_pretrained_kwargs = {
                 "attn_implementation": attn_implementation_for_load,
-                "device_map": "auto" if quant_config else device,
+                "device_map": "auto", # <-- MODIFIED: device_map='auto' is required for bitsandbytes
                 "quantization_config": quant_config,
             }
 
@@ -318,7 +345,7 @@ def parse_script_1_based(script: str) -> tuple[list[tuple[int, str]], list[int]]
     speaker_ids_in_script = [] # This will store the 1-based IDs from the script
     for line in script.strip().split("\n"):
         if not (line := line.strip()): continue
-        match = re.match(r'^Speaker\s+(\d+)\s*:\s*(.*)$', line, re.IGNORECASE)
+        match = re.match(r'^Speaker\s+(\d+)\s*:\s*(.*)$', line, re-IGNORECASE)
         if match:
             speaker_id = int(match.group(1))
             if speaker_id < 1:
@@ -396,9 +423,10 @@ class VibeVoiceTTSNode:
                     "default": "Speaker 1: Hello from ComfyUI!\nSpeaker 2: VibeVoice sounds amazing.",
                     "tooltip": "The script for the conversation. Use 'Speaker 1:', 'Speaker 2:', etc. to assign lines to different voices. Each speaker line should be on a new line."
                 }),
+                # <-- MODIFIED: Updated label and tooltip for clarity
                 "quantize_llm_4bit": ("BOOLEAN", {
-                    "default": False, "label_on": "Q4 (LLM only)", "label_off": "Full precision",
-                    "tooltip": "Quantize the Qwen2.5 LLM to 4-bit NF4 via bitsandbytes. Diffusion head stays BF16/FP32."
+                    "default": True, "label_on": "Enabled", "label_off": "Disabled",
+                    "tooltip": "Enable 4-bit quantization. This is REQUIRED for 4-bit models and recommended for large models on GPUs with < 24GB VRAM."
                 }),
                 "attention_mode": (ATTENTION_MODES, {
                     "default": "sdpa",
@@ -450,12 +478,16 @@ class VibeVoiceTTSNode:
     CATEGORY = "audio/tts"
 
     def generate_audio(self, model_name, text, attention_mode, cfg_scale, inference_steps, seed, do_sample, temperature, top_p, top_k, quantize_llm_4bit, force_offload, **kwargs):
+        
+        # <-- MODIFIED: Logic moved to VibeVoiceModelHandler and VibeVoiceLoader for better structure
+        is_prequantized = MODEL_CONFIGS.get(model_name, {}).get("is_quantized", False)
+        is_final_quantized = is_prequantized or quantize_llm_4bit
 
         actual_attention_mode = attention_mode
-        if quantize_llm_4bit and attention_mode in ["eager", "flash_attention_2"]:
+        if is_final_quantized and attention_mode in ["eager", "flash_attention_2"]:
             actual_attention_mode = "sdpa"
         
-        cache_key = f"{model_name}_attn_{actual_attention_mode}_q4_{int(quantize_llm_4bit)}"
+        cache_key = f"{model_name}_attn_{actual_attention_mode}_q4_{int(is_final_quantized)}"
         
         # Clean up old models when switching to a different model
         if cache_key not in VIBEVOICE_PATCHER_CACHE:
@@ -519,9 +551,6 @@ class VibeVoiceTTSNode:
                 if top_k > 0:
                     generation_config['top_k'] = top_k
 
-            # cause float() error for q4+eager
-            # model = model.float() IS REMOVED
-            
             with torch.no_grad():
                 pbar = ProgressBar(inference_steps)
                 
